@@ -1,0 +1,493 @@
+---
+title: "Stat 133 Final Project Report"
+author: "Bofan Chen"
+date: "August 15, 2015"
+output: pdf_document
+---
+
+=======
+Directories Creating and Data Downloading
+=======
+
+First and foremost, we create all the directories needed for this project. After that, we download all the files needed for this project. All the code below is also present in the "skeleton.R" file:
+
+```{r, eval=FALSE}
+system('mkdir code')
+system('mkdir rawdata')
+system('mkdir data')
+system('mkdir resources')
+system('mkdir report')
+system('mkdir images')
+download.file('ftp://eclipse.ncdc.noaa.gov/pub/ibtracs/v03r06/wmo/hurdat_format/basin/Basin.NA.ibtracs_hurdat.v03r06.hdat',
+              'rawdata/Basin.NA.ibtracs_hurdat.v03r06.hdat')
+download.file('ftp://eclipse.ncdc.noaa.gov/pub/ibtracs/v03r06/wmo/csv/basin/Basin.EP.ibtracs_wmo.v03r06.csv',
+              'rawdata/stormsEP.csv')
+download.file('ftp://eclipse.ncdc.noaa.gov/pub/ibtracs/v03r06/wmo/csv/basin/Basin.NA.ibtracs_wmo.v03r06.csv',
+              'rawdata/stormsNA.csv')
+```
+
+========
+Libraries Initializing
+========
+
+Then we run all the libraries needed for this project:
+
+```{r, message=FALSE}
+library(stringr)
+library(dplyr)
+library(maps)
+library(ggplot2)
+```
+
+Now, with all the trivialities prepared and ready, we may commence our journey.
+
+
+=========
+Data Processing
+=========
+
+The first part is data processing. To create storms.csv from raw data 'Basin.NA.ibtracs_hurdat.v03r06.hdat', we have:
+
+```{r}
+sid <- c() #id column
+sdate <- c() #date column
+sdays <- c() #days column
+sname <- c() #name column
+data <- read.table("rawdata/Basin.NA.ibtracs_hurdat.v03r06.hdat",
+                   sep = '\t', header = FALSE) #Read in the table
+# Obtain each column with a series of data extraction
+for (num in 1:nrow(data)) {
+  row <- as.character(data[num,])
+  if (nchar(row) == 85) { # if the line is a header
+    sid <- c(sid, str_extract(str_extract(row, 'SNBR=.{4}'), '[0-9]+'))
+    sdate <- c(sdate, substr(row, 7, 16)) 
+    sdays <- c(sdays, str_extract(str_extract(row, 'M=.{2}'), '[0-9]+'))
+    sname <- c(sname, str_extract(substr(row, 36, 48), '[A-Z]+'))
+  }
+}
+#Combine the obtained columns into a data frame
+storms <- data.frame(id = as.numeric(sid),
+                     date = format(as.Date(sdate, '%m/%d/%Y'), '%m/%d/%Y'),
+                     days = as.numeric(sdays), name = as.character(sname))
+#Write the table into storms.csv
+write.table(storms, "data/storms.csv")
+```
+
+To create tracks.csv from raw data 'Basin.NA.ibtracs_hurdat.v03r06.hdat', we have:
+
+```{r}
+#stage_convert function is used for converting symbols in Hurdat file into cyclone types
+stage_convert <- function(symbol) {
+  switch (symbol,
+          '*' = 'cyclone',
+          'S' = 'subtropical',
+          'E' = 'extratropical',
+          'W' = 'wave',
+          'L' = 'remnant low')
+}
+
+tid <- c() #id column
+tdate <- c() #date column
+tperiod <- c() #period column
+tstage <- c() #stage column
+tlat <- c() #latitude column
+tlong <- c() #longitude column
+twind <- c() #wind speed column
+tpress <- c() #pressure column
+
+#Obtain the column using a series of data extraction
+for (num in 1:nrow(data)) { # we iterate through each line of the hurdat file
+  row <- as.character(data[num,])
+  if (nchar(row) == 85) { # if the line is a header
+    id <- str_extract(str_extract(row, 'SNBR=.{4}'), '[0-9]+')
+    year <- substr(row, 13, 16)
+  }
+  if (nchar(row) == 80) { # if the line is daily data
+    tid <- c(tid, rep(id, 4))
+    tdate <- c(tdate, rep(paste0(substr(row, 7, 11), '/', year), 4))
+    tperiod <- c(tperiod, c('00h', '06h', '12h', '18h'))
+    tstage <- c(tstage, c(stage_convert(substr(row, 12, 12)),
+                          stage_convert(substr(row, 29, 29)),
+                          stage_convert(substr(row, 46, 46)),
+                          stage_convert(substr(row, 63, 63)))) 
+    tlat <- c(tlat, c(as.numeric(substr(row, 13, 15)) / 10,
+                      as.numeric(substr(row, 30, 32)) / 10,
+                      as.numeric(substr(row, 47, 49)) / 10,
+                      as.numeric(substr(row, 64, 66)) / 10))
+    tlong <- c(tlong, c(as.numeric(substr(row, 16, 19)) / 10 - 360,
+                        as.numeric(substr(row, 33, 36)) / 10 - 360,
+                        as.numeric(substr(row, 50, 53)) / 10 - 360,
+                        as.numeric(substr(row, 67, 70)) / 10 - 360))
+    twind <- c(twind, c(as.numeric(substr(row, 20, 23)),
+                        as.numeric(substr(row, 37, 40)),
+                        as.numeric(substr(row, 54, 57)),
+                        as.numeric(substr(row, 71, 74))))
+    tpress <- c(tpress, c(as.numeric(substr(row, 25, 28)),
+                          as.numeric(substr(row, 42, 45)),
+                          as.numeric(substr(row, 59, 62)),
+                          as.numeric(substr(row, 76, 79))))
+  }
+}
+#Combine the obtained columns into a data frame
+tracks <- data.frame(id = as.numeric(tid),
+                     date = format(as.Date(tdate, '%m/%d/%Y'), '%m/%d/%Y'),
+                     period = as.character(tperiod),
+                     stage = as.character(tstage),
+                     lat = tlat, long = tlong, wind = twind, press = tpress)
+#Get rid of rows that have latitude, longitude, wind and pressure all 0s, as required
+tracks <- filter(tracks, !(lat == 0 & long == -360 & wind == 0 & press == 0))
+#Reorder the row numbers after removing those rows
+row.names(tracks) <- 1:nrow(tracks)
+#Write the table into tracks.csv
+write.table(tracks, 'data/tracks.csv') 
+```
+
+===========
+Data Analysis
+===========
+
+After cleaning the data, we are able to analyze the data:
+
+```{r}
+#We first read the data just created
+storms <- read.table("data/storms.csv") 
+tracks <- read.table("data/tracks.csv")
+
+#Select the data from tracks which are between years 1980 and 2010 
+#and write it into a new variable track_anal
+tracks_anal <- subset(tracks, format(as.Date(tracks$date, "%m/%d/%Y"), '%Y') >= 1980 & 
+                        format(as.Date(tracks$date, "%m/%d/%Y"), '%Y') <= 2010)
+#Convert the date columns from numeric format to date format
+tracks_anal$date <- as.Date(tracks_anal$date, "%m/%d/%Y")
+#Select out few columns to analyze storms per year
+wind_year <- data.frame(year = as.numeric(format(tracks_anal$date, '%Y')),
+                        id = tracks_anal$id, wind = tracks_anal$wind)
+#Select out few columns to analyze storms per month
+wind_month <- data.frame(month_id = paste0(as.numeric(format(tracks_anal$date, '%m')),
+                                           ' ', tracks_anal$id),
+                         year = as.numeric(format(tracks_anal$date, '%Y')),
+                         wind = tracks_anal$wind)
+
+temp <- aggregate(wind_year[, c('wind', 'year')], list(id = wind_year$id), max)
+temp1 <- aggregate(wind_month[, c('wind')], list(id = wind_month$month_id), max)
+temp2 <- data.frame(month = month.name[as.numeric(str_extract(temp1$id, '.+\\s'))],
+                    wind = temp1$x)
+temp2$month = factor(temp2$month, levels = month.name)
+#Obtain the table for each data and ready to answer the following questions
+table1 <- table(temp$year)
+table2 <- table(temp$year[temp$wind >= 35])
+table3 <- table(temp$year[temp$wind >= 64])
+table4 <- table(temp$year[temp$wind >= 96])
+```
+
+Analysis Per Year
+Obtain frequencies and barplots for:
+
+Num. of storms per year:
+```{r}
+table1
+barplot(table1, main = 'Number of Storms per year', xlab = 'Year',
+        ylab = 'Number of storms', col = '#234433')
+dev.copy(png, 'images/storms per year.png')
+dev.off()
+```
+
+Num. of storms per year with winds >= 35 knots:
+```{r}
+table2
+barplot(table2,
+        main = 'Number of Storms with wind speed >= 35 knots per year',
+        xlab = 'Year', ylab = 'Number of storms', col = '#234433')
+dev.copy(png, 'images/storms>=35 per year.png')
+dev.off()
+```
+
+Num. of storms per year with winds >= 64 knots
+```{r}
+table3
+barplot(table3,
+        main = 'Number of Storms with wind speed >= 64 knots per year',
+        xlab = 'Year', ylab = 'Number of storms', col = '#234433')
+dev.copy(png, 'images/storms>=64 per year.png')
+dev.off()
+```
+
+Num. of storms per year with winds >= 96 knots:
+```{r}
+table4
+barplot(table4,
+        main = 'Number of Storms with wind speed >= 96 knots per year',
+        xlab = 'Year', ylab = 'Number of storms', col = '#234433')
+dev.copy(png, 'images/storms>=96 per year.png')
+dev.off()
+```
+
+Analysis Per Month
+Obtain frequencies and barplots for:
+
+Num. of storms per month:
+```{r}
+table(temp2$month)
+barplot(table(temp2$month), main = 'Number of Storms per month',
+        xlab = 'Month', ylab = 'Number of storms', col = '#241132')
+dev.copy(png, 'images/storms per month.png')
+dev.off()
+```
+
+Num. of storms per month with winds >= 35 knots:
+```{r}
+table(temp2$month[temp2$wind >= 35])
+barplot(table(temp2$month[temp2$wind >= 35]),
+        main = 'Number of Storms with wind speed >= 35 knots
+        per month', xlab = 'Month', ylab = 'Number of storms',
+        col = '#241132')
+dev.copy(png, 'images/storms>=35 per month.png')
+dev.off()
+```
+
+Num. of storms per month with winds >= 64 knots:
+```{r}
+table(temp2$month[temp2$wind >= 64])
+barplot(table(temp2$month[temp2$wind >= 64]),
+        main = 'Number of Storms with wind speed >= 64 knots
+        per month', xlab = 'Month', ylab = 'Number of storms',
+        col = '#241132')
+dev.copy(png, 'images/storms>=64 per month.png')
+dev.off()
+```
+
+Num. of storms per month with winds >= 96 knots:
+```{r}
+table(temp2$month[temp2$wind >= 96])
+barplot(table(temp2$month[temp2$wind >= 96]),
+        main = 'Number of Storms with wind speed >= 96 knots
+        per month', xlab = 'Month', ylab = 'Number of storms',
+        col = '#241132')
+dev.copy(png, 'images/storms>=96 per month.png')
+dev.off()
+```
+
+Annual Avg Number of Storms
+Subsequently, we compute the following statsitics for storms >=35 knots, >=64 knots, >=96 knots, average value, std deviation, 25th percentile, 50th percentile and 75th percentile.
+
+```{r}
+all <- list(as.vector(table2), as.vector(table3),
+            as.vector(table4))
+stats <- data.frame(round(sapply(all, mean), 1),
+                    round(sapply(all, sd), 2), 
+                    sapply(all, quantile)['25%',],
+                    sapply(all, quantile)['50%',],
+                    sapply(all, quantile)['75%',])
+rownames(stats) <- c('35 knots', '64 knots', '96 knots')
+colnames(stats) <- c('Avg', 'Std Dev', '25th', '50th', '75th')
+stats
+```
+
+Regression Analysis
+Regression analysis 1: mean pressure and mean wind speed for each storm 
+(remove observations with mean pressure = 0)
+
+```{r}
+tracks_anal$press[tracks_anal$press == 0] <- NA
+mean_pw <- aggregate(tracks_anal[, c('press', 'wind')],
+                     list(id = tracks_anal$id), mean)
+mean_pw <- subset(mean_pw, press != 0)
+
+plot(mean_pw$id, mean_pw$press,
+     main = 'Mean pressure for each storm (regression line)',
+     xlab = 'Storms ID', ylab = 'Mean Pressure', pch = 20,
+     cex = 1, col = '#0000cc')
+abline(lm(mean_pw$press ~ mean_pw$id), lwd = 3, col = "#b20000")
+dev.copy(png, 'images/mean pressure(regression).png')
+dev.off()
+
+plot(mean_pw$id, mean_pw$wind,
+     main = 'Mean wind speed for each storm (regression line)',
+     xlab = 'Storms ID', ylab = 'Mean Wind Speed', pch = 20,
+     cex = 1, col = '#0000cc')
+abline(lm(mean_pw$wind ~ mean_pw$id), lwd = 3, col = "#b20000")
+dev.copy(png, 'images/mean wind speed(regression).png')
+dev.off()
+```
+
+Regression analysis 2: median pressure and median wind speed for each storm 
+(remove observations with median pressure = 0)
+
+```{r}
+median_pw <- aggregate(tracks_anal[, c('press', 'wind')],
+                       list(id = tracks_anal$id), median)
+median_pw <- subset(median_pw, press != 0)
+
+plot(median_pw$id, median_pw$press,
+     main = 'Median pressure for each storm (regression line)',
+     xlab = 'Storms ID', ylab = 'Median Pressure', pch = 20,
+     cex = 1, col = '#00994c')
+abline(lm(median_pw$press ~ median_pw$id), lwd = 3, col = "#7f3f00")
+dev.copy(png, 'images/median pressure(regression).png')
+dev.off()
+
+plot(median_pw$id, median_pw$wind,
+     main = 'Median wind speed for each storm (regression line)',
+     xlab = 'Storms ID', ylab = 'Median Wind Speed', pch = 20,
+     cex = 1, col = '#00994c')
+abline(lm(median_pw$wind ~ median_pw$id), lwd = 3, col = "#7f3f00")
+dev.copy(png, 'images/median wind speed(regression).png')
+dev.off()
+```
+
+==========
+Visualization
+==========
+
+In this part, we aim to visualize the trajectory of the storms in both the East Pacific (EP) and the North Atlantic (NA) basins during the period 1980-2010. The data needed for this part have been downloaded and stored as 'rawdata/stormsEP.csv' and 'rawdata/stormsNA.csv'.
+
+We read in the data and obtain the rows in which the year is between 1980 and 2010.
+
+```{r}
+headerEP <- read.table('rawdata/stormsEP.csv',
+                       skip = 1, nrows = 1, header = FALSE, sep = ',')
+stormsEP <- read.table('rawdata/stormsEP.csv',
+                       skip = 3, header = FALSE, sep = ',')
+colnames(stormsEP) <- unlist(headerEP)
+stormsEP <- subset(stormsEP, Season >= 1980 & Season <= 2010)
+
+headerNA <- read.table('rawdata/stormsNA.csv',
+                       skip = 1, nrows = 1, header = FALSE, sep = ',')
+stormsNA <- read.table('rawdata/stormsNA.csv',
+                       skip = 3, header = FALSE, sep = ',')
+colnames(stormsNA) <- unlist(headerNA)
+stormsNA <- subset(stormsNA, Season >= 1980 & Season <= 2010)
+```
+
+We then combined the two data and add four columns, namely 'windc', 'date', 'month' and 'year', which will make upcoming tasks easier.
+
+```{r, message=FALSE, warning=FALSE}
+# We use full_join from dplyr package
+combined <- full_join(stormsEP, stormsNA)
+# After inspecting the longitude values for all storms, we realize that some of them 
+#are greater than 100, which might cause trouble when graphing. Therefore, we pre-emptively
+#subtract those value by 360, so that the trajectories of storm won't appear stright
+#across the map.
+combined$Longitude[combined$Longitude > 100] <-
+  combined$Longitude[combined$Longitude > 100] - 360
+#windc is a column that put wind speed into 4 categories based on the number of knots.
+combined$windc <- round(combined$`Wind(WMO)` / 50) * 50
+#extract the date of each storm observation
+combined$date <- as.Date(str_sub(combined$ISO_time, 1, 10))
+#extract the month
+combined$month <- factor(format(combined$date, '%B'), levels = month.name)
+#extract the year
+combined$year <- format(combined$date, '%Y')
+```
+
+With the bit of modification of the data frame, we are ready to go and plot out each graph.
+
+```{r, message=FALSE}
+#load in world map, using map_data from 'map' package.
+states_map <- map_data('world')
+
+#All Storm Trajectories (1980-2010)
+ggplot(combined, aes(x = Longitude, y = Latitude, group = Serial_Num)) + 
+  geom_polygon(data = states_map, fill = '#666666',
+               aes(x = long, y = lat, group = group)) +
+  geom_path(aes(col = factor(windc))) +
+  scale_color_manual(name = 'Wind (knots)',
+                     values = c('0' = '#000066', '50' = '#00007f',
+                                '100' = '#0000cc', '150' = '#0000ff')) +
+  coord_cartesian(xlim = c(-140, -15), ylim = c(5, 60)) +
+  ggtitle('All Storm Trajectories (1980-2010)') +
+  theme(axis.ticks=element_blank(),
+        axis.text.x=element_blank(), axis.text.y=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = '#000000'))
+ggsave('images/all storm trajectories (1980-2010).png')
+```
+
+```{r, message=FALSE}
+#Hurricane Trajectories by Month (1980-2010)
+ggplot(combined, aes(x = Longitude, y = Latitude, group = Serial_Num)) + 
+  facet_wrap(~ month) +
+  geom_polygon(data = states_map, fill = '#666666',
+               aes(x = long, y = lat, group = group)) +
+  geom_path(aes(col = factor(windc))) +
+  scale_color_manual(name = 'Wind (knots)',
+                     values = c('0' = '#000066', '50' = '#00007f',
+                                '100' = '#0000cc', '150' = '#0000ff')) +
+  coord_cartesian(xlim = c(-140, -15), ylim = c(5, 60)) +
+  ggtitle('Hurricane Trajectories by Month (1980-2010)') +
+  theme(axis.ticks=element_blank(),
+        axis.text.x=element_blank(), axis.text.y=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = '#000000'))
+ggsave('images/hurricane trajectories by month (1980-2010).png')
+```
+
+```{r, message = FALSE}
+#select out the data in the 1980s
+combined1980s <- subset(combined, year >= 1980 & year <= 1989)
+#Hurricane Trajectories by Year (1980-1989)
+ggplot(combined1980s, aes(x = Longitude, y = Latitude, group = Serial_Num)) + 
+  facet_wrap(~ year) +
+  geom_polygon(data = states_map, fill = '#666666',
+               aes(x = long, y = lat, group = group)) +
+  geom_path(aes(col = factor(windc))) +
+  scale_color_manual(name = 'Wind (knots)',
+                     values = c('0' = '#000066', '50' = '#00007f',
+                                '100' = '#0000cc', '150' = '#0000ff')) +
+  coord_cartesian(xlim = c(-140, -15), ylim = c(5, 60)) +
+  ggtitle('Hurricane Trajectories by Year (1980-1989)') +
+  theme(axis.ticks=element_blank(),
+        axis.text.x=element_blank(), axis.text.y=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = '#000000'))
+ggsave('images/hurricane trajectories by month (1980-1989).png')
+```
+
+```{r, message=FALSE}
+#select out the data in the 1990s
+combined1990s <- subset(combined, year >= 1990 & year <= 1999)
+#Hurricane Trajectories by Year (1990-1999)
+ggplot(combined1990s, aes(x = Longitude, y = Latitude, group = Serial_Num)) + 
+  facet_wrap(~ year) +
+  geom_polygon(data = states_map, fill = '#666666',
+               aes(x = long, y = lat, group = group)) +
+  geom_path(aes(col = factor(windc))) +
+  scale_color_manual(name = 'Wind (knots)',
+                     values = c('0' = '#000066', '50' = '#00007f',
+                                '100' = '#0000cc', '150' = '#0000ff')) +
+  coord_cartesian(xlim = c(-140, -15), ylim = c(5, 60)) +
+  ggtitle('Hurricane Trajectories by Year (1990-1999)') +
+  theme(axis.ticks=element_blank(),
+        axis.text.x=element_blank(), axis.text.y=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = '#000000'))
+ggsave('images/hurricane trajectories by month (1990-1999).png')
+```
+
+```{r, message=FALSE}
+#select out the data in the 2000s
+combined2000s <- subset(combined, year >= 2000 & year <= 2010)
+#Hurricane Trajectories by Year (2000-2010)
+ggplot(combined2000s, aes(x = Longitude, y = Latitude, group = Serial_Num)) + 
+  facet_wrap(~ year) +
+  geom_polygon(data = states_map, fill = '#666666',
+               aes(x = long, y = lat, group = group)) +
+  geom_path(aes(col = factor(windc))) +
+  scale_color_manual(name = 'Wind (knots)',
+                     values = c('0' = '#000066', '50' = '#00007f',
+                                '100' = '#0000cc', '150' = '#0000ff')) +
+  coord_cartesian(xlim = c(-140, -15), ylim = c(5, 60)) +
+  ggtitle('Hurricane Trajectories by Year (2000-2010)') +
+  theme(axis.ticks=element_blank(),
+        axis.text.x=element_blank(), axis.text.y=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = '#000000'))
+ggsave('images/hurricane trajectories by month (2000-2010).png')
+```
+
+That's it for the project. Thanks for reading!!
